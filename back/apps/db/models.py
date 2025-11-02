@@ -5,6 +5,9 @@ from django.conf import settings
 from django.utils import timezone
 from datetime import datetime, timedelta
 from pgvector.django import VectorField
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Video(models.Model):
@@ -108,6 +111,165 @@ class Video(models.Model):
             return self.cold_s3_key
         return self.s3_key or self.s3_raw_key
     
+    @property
+    def file_path(self):
+        """
+        비디오 파일 경로 반환 - current_s3_url과 동일한 로직 사용
+        프론트엔드 호환성을 위한 property
+        """
+        # Serializer의 _generate_s3_url과 동일한 방식 사용
+        s3_key = self.get_current_s3_key()
+        if not s3_key:
+            # S3 키가 없으면 로컬 경로 반환
+            return f"/uploads/videos/{self.name or self.filename}"
+        
+        try:
+            from django.conf import settings
+            from botocore.exceptions import ClientError
+            
+            # Serializer와 동일한 방식으로 boto3 클라이언트 생성
+            s3_client = boto3.client(
+                's3',
+                region_name=getattr(settings, 'AWS_S3_REGION_NAME', 'ap-northeast-2'),
+                aws_access_key_id=getattr(settings, 'AWS_ACCESS_KEY_ID', None),
+                aws_secret_access_key=getattr(settings, 'AWS_SECRET_ACCESS_KEY', None)
+            )
+            
+            bucket_name = self.s3_bucket or getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'capstone-dev-raw')
+            
+            presigned_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': bucket_name,
+                    'Key': s3_key
+                },
+                ExpiresIn=3600  # 1시간
+            )
+            return presigned_url
+        except Exception as e:
+            logger.warning(f"S3 presigned URL 생성 실패: {e}")
+            # 예외 발생 시 로컬 경로 반환
+            return f"/uploads/videos/{self.name or self.filename}"
+    
+    @property
+    def computed_thumbnail_path(self):
+        """
+        썸네일 경로 반환 - S3 Presigned URL 우선
+        프론트엔드 호환성을 위한 property
+        """
+        # S3 썸네일이 있으면 presigned URL 반환
+        thumbnail_key = self.thumbnail_s3_key or self.s3_thumbnail_key
+        if thumbnail_key:
+            try:
+                # region 명시적으로 설정
+                s3_client = boto3.client('s3', region_name='ap-northeast-2')
+                return s3_client.generate_presigned_url(
+                    'get_object',
+                    Params={
+                        'Bucket': 'capstone-dev-thumbnails',
+                        'Key': thumbnail_key
+                    },
+                    ExpiresIn=3600  # 1시간 유효
+                )
+            except Exception as e:
+                logger.warning(f"썸네일 URL 생성 실패: {e}")
+        
+        # Fallback: 로컬 경로 반환 (기존 호환성)
+        thumbnail_name = self.name or self.filename
+        if thumbnail_name:
+            # 확장자를 .png로 변경
+            base_name = thumbnail_name.rsplit('.', 1)[0] if '.' in thumbnail_name else thumbnail_name
+            return f"/uploads/thumbnails/{base_name}.png"
+        
+        return None
+    
+    def delete(self, *args, **kwargs):
+        """비디오 삭제 시 S3 파일 및 모든 관련 데이터 삭제"""
+        logger.info(f"비디오 삭제 시작: {self.name} (ID: {self.video_id})")
+        
+        # S3 클라이언트 초기화
+        try:
+            s3_client = boto3.client(
+                's3',
+                region_name=getattr(settings, 'AWS_S3_REGION_NAME', 'ap-northeast-2'),
+                aws_access_key_id=getattr(settings, 'AWS_ACCESS_KEY_ID', None),
+                aws_secret_access_key=getattr(settings, 'AWS_SECRET_ACCESS_KEY', None)
+            )
+        except Exception as e:
+            logger.error(f"S3 클라이언트 초기화 실패: {e}")
+            s3_client = None
+        
+        # 1. S3 Raw 비디오 파일 삭제
+        if s3_client and self.s3_raw_key:
+            try:
+                # s3_bucket 필드가 잘못된 경우를 대비해 settings에서 직접 가져오기
+                bucket = getattr(settings, 'AWS_RAW_BUCKET_NAME', 'capstone-dev-raw')
+                s3_client.delete_object(Bucket=bucket, Key=self.s3_raw_key)
+                logger.info(f"✅ S3 raw 비디오 삭제 완료: s3://{bucket}/{self.s3_raw_key}")
+            except Exception as e:
+                logger.error(f"❌ S3 raw 비디오 삭제 실패: {e}")
+        
+        # 2. S3 썸네일 파일 삭제
+        thumbnail_key = self.thumbnail_s3_key or self.s3_thumbnail_key
+        if s3_client and thumbnail_key:
+            try:
+                thumbnail_bucket = getattr(settings, 'AWS_THUMBNAILS_BUCKET_NAME', 'capstone-dev-thumbnails')
+                s3_client.delete_object(Bucket=thumbnail_bucket, Key=thumbnail_key)
+                logger.info(f"✅ S3 썸네일 삭제 완료: s3://{thumbnail_bucket}/{thumbnail_key}")
+            except Exception as e:
+                logger.error(f"❌ S3 썸네일 삭제 실패: {e}")
+        
+        # 3. S3 하이라이트 이미지들 삭제 (관련 세션의 하이라이트들)
+        if s3_client:
+            try:
+                highlights_bucket = getattr(settings, 'AWS_HIGHLIGHTS_BUCKET_NAME', 'capstone-dev-highlights')
+                # 이 비디오와 관련된 하이라이트 prefix로 검색
+                video_prefix = f"highlights/{self.video_id}/"
+                
+                response = s3_client.list_objects_v2(Bucket=highlights_bucket, Prefix=video_prefix)
+                if 'Contents' in response:
+                    for obj in response['Contents']:
+                        s3_client.delete_object(Bucket=highlights_bucket, Key=obj['Key'])
+                        logger.info(f"✅ S3 하이라이트 삭제: {obj['Key']}")
+            except Exception as e:
+                logger.error(f"❌ S3 하이라이트 삭제 실패: {e}")
+        
+        # 4. Warm/Cold 티어 S3 파일 삭제
+        if s3_client:
+            bucket = getattr(settings, 'AWS_RAW_BUCKET_NAME', 'capstone-dev-raw')
+            if self.warm_s3_key:
+                try:
+                    s3_client.delete_object(Bucket=bucket, Key=self.warm_s3_key)
+                    logger.info(f"✅ Warm 티어 파일 삭제 완료: {self.warm_s3_key}")
+                except Exception as e:
+                    logger.error(f"❌ Warm 티어 파일 삭제 실패: {e}")
+            
+            if self.cold_s3_key:
+                try:
+                    s3_client.delete_object(Bucket=bucket, Key=self.cold_s3_key)
+                    logger.info(f"✅ Cold 티어 파일 삭제 완료: {self.cold_s3_key}")
+                except Exception as e:
+                    logger.error(f"❌ Cold 티어 파일 삭제 실패: {e}")
+        
+        # 5. 데이터베이스에서 삭제 (CASCADE로 관련 데이터 자동 삭제)
+        # - Event, PromptInteraction, DepthData, DisplayData 등
+        # - PromptSession은 ManyToMany이므로 직접 삭제 필요
+        try:
+            session_count = self.promptsession_set.count()
+            event_count = self.events.count()
+            
+            logger.info(f"🗑️ DB 삭제: {session_count}개 세션 연결, {event_count}개 이벤트")
+            
+            # ManyToMany 관계의 세션들 연결 해제
+            self.promptsession_set.clear()
+            
+        except Exception as e:
+            logger.error(f"관련 데이터 카운트/삭제 실패: {e}")
+        
+        super().delete(*args, **kwargs)
+        
+        logger.info(f"✅ 비디오 삭제 완료: {self.name} (ID: {self.video_id})")
+    
     def __str__(self):
         return f"{self.name or self.filename} ({self.data_tier})"
 
@@ -151,6 +313,24 @@ class Event(models.Model):
     
     # 추가 메타데이터
     attributes = models.JSONField(default=dict, blank=True)  # 추가 속성들
+    
+    # S3 썸네일 정보 (FastAPI 영상분석에서 생성)
+    s3_thumbnail_bucket = models.CharField(
+        max_length=63, 
+        default='capstone-dev-thumbnails',
+        help_text="썸네일 이미지가 저장된 S3 버킷"
+    )
+    s3_thumbnail_key = models.CharField(
+        max_length=500, 
+        null=True, 
+        blank=True,
+        help_text="썸네일 이미지의 S3 객체 키 (예: events/event_001/frame_1234.jpg)"
+    )
+    thumbnail_uploaded_at = models.DateTimeField(
+        null=True, 
+        blank=True,
+        help_text="썸네일이 S3에 업로드된 시각"
+    )
     
     # RAG 검색을 위한 임베딩
     embedding = VectorField(dimensions=1536, blank=True, null=True)
@@ -202,6 +382,26 @@ class Event(models.Model):
             self.action, self.emotion, self.interaction_target
         ]
         self.keywords = [k for k in self.keywords if k]
+    
+    @property
+    def thumbnail_url(self):
+        """썸네일 Presigned URL 생성"""
+        if not self.s3_thumbnail_key:
+            return None
+        
+        try:
+            s3_client = boto3.client('s3')
+            return s3_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': self.s3_thumbnail_bucket,
+                    'Key': self.s3_thumbnail_key
+                },
+                ExpiresIn=3600  # 1시간 유효
+            )
+        except Exception as e:
+            logger.warning(f"썸네일 URL 생성 실패: {e}")
+            return None
     
     def __str__(self):
         return f"{self.video.name or self.video.filename} - {self.event_type} at {self.timestamp}s"

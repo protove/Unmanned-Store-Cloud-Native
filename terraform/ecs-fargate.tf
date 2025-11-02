@@ -70,8 +70,12 @@ resource "aws_iam_role_policy" "ecs_task_s3_policy" {
           "s3:ListBucket"
         ]
         Resource = [
-          "${aws_s3_bucket.video_storage.arn}",
-          "${aws_s3_bucket.video_storage.arn}/*"
+          "${aws_s3_bucket.raw_videos.arn}",
+          "${aws_s3_bucket.raw_videos.arn}/*",
+          "${aws_s3_bucket.thumbnails.arn}",
+          "${aws_s3_bucket.thumbnails.arn}/*",
+          "${aws_s3_bucket.highlights.arn}",
+          "${aws_s3_bucket.highlights.arn}/*"
         ]
       }
     ]
@@ -108,6 +112,32 @@ resource "aws_iam_role_policy" "ecs_task_bedrock_policy" {
             "aws:RequestedRegion" = "ap-northeast-2"
           }
         }
+      }
+    ]
+  })
+}
+
+# SQS 접근 권한
+resource "aws_iam_role_policy" "ecs_task_sqs_policy" {
+  name = "ecs-task-sqs-policy"
+  role = aws_iam_role.ecs_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage",
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl"
+        ]
+        Resource = [
+          aws_sqs_queue.video_processing.arn,
+          aws_sqs_queue.video_processing_dlq.arn
+        ]
       }
     ]
   })
@@ -159,11 +189,11 @@ resource "aws_ecs_task_definition" "frontend" {
       environment = [
         {
           name  = "NEXT_PUBLIC_API_URL"
-          value = "http://${aws_lb.main.dns_name}/api"
+          value = "https://api.deepsentinel.cloud"
         },
         {
           name  = "NEXT_PUBLIC_S3_BUCKET"
-          value = aws_s3_bucket.video_storage.id
+          value = aws_s3_bucket.raw_videos.id
         },
         {
           name  = "NEXT_PUBLIC_S3_REGION"
@@ -212,7 +242,7 @@ resource "aws_ecs_task_definition" "backend" {
   container_definitions = jsonencode([
     {
       name      = "backend"
-      image     = "${var.account_id}.dkr.ecr.${var.region}.amazonaws.com/capstone-backend:latest"
+  image     = "${var.account_id}.dkr.ecr.${var.region}.amazonaws.com/capstone-backend:latest"
       essential = true
 
       portMappings = [
@@ -241,11 +271,19 @@ resource "aws_ecs_task_definition" "backend" {
         },
         {
           name  = "AWS_STORAGE_BUCKET_NAME"
-          value = aws_s3_bucket.video_storage.id
+          value = aws_s3_bucket.raw_videos.id
+        },
+        {
+          name  = "AWS_S3_THUMBNAILS_BUCKET"
+          value = aws_s3_bucket.thumbnails.id
         },
         {
           name  = "AWS_S3_REGION_NAME"
           value = var.region
+        },
+        {
+          name  = "AWS_SQS_QUEUE_URL"
+          value = aws_sqs_queue.video_processing.url
         },
         {
           name  = "USE_S3"
@@ -283,7 +321,7 @@ resource "aws_ecs_task_definition" "backend" {
           valueFrom = aws_secretsmanager_secret.db_password.arn
         },
         {
-          name      = "DJANGO_SECRET_KEY"
+          name      = "SECRET_KEY"
           valueFrom = aws_secretsmanager_secret.django_secret.arn
         }
       ]
