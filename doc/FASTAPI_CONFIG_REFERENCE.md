@@ -134,7 +134,7 @@ environment = [
   },
   {
     name  = "SQS_QUEUE_URL"
-    value = "https://sqs.ap-northeast-2.amazonaws.com/287709190208/capstone-dev-video-processing"
+    "value": "https://sqs.ap-northeast-2.amazonaws.com/<AWS_ACCOUNT_ID>/capstone-dev-video-processing"
   },
   {
     name  = "S3_BUCKET_RAW"
@@ -146,7 +146,7 @@ environment = [
   },
   {
     name  = "DB_SECRET_ARN"
-    value = "arn:aws:secretsmanager:ap-northeast-2:287709190208:secret:capstone/db-password-bnNBe2"
+    "value": "arn:aws:secretsmanager:ap-northeast-2:<AWS_ACCOUNT_ID>:secret:capstone/db-password"
   },
   {
     name  = "ENVIRONMENT"

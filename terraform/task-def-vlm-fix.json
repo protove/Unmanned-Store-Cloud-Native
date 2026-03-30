@@ -1,7 +1,7 @@
 {
   "family": "capstone-backend",
-  "executionRoleArn": "arn:aws:iam::287709190208:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::287709190208:role/ecsTaskRole",
+  "executionRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/ecsTaskRole",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "512",
@@ -9,7 +9,7 @@
   "containerDefinitions": [
     {
       "name": "backend",
-      "image": "287709190208.dkr.ecr.ap-northeast-2.amazonaws.com/capstone-backend:vlm-fix",
+      "image": "<AWS_ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/capstone-backend:vlm-fix",
       "essential": true,
       "portMappings": [
         {
