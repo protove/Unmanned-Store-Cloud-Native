@@ -11,9 +11,9 @@
 
 | 항목 | 내용 |
 |------|------|
-| **역할** | Cloud Infra Lead |
-| **담당** | S3/SQS/EC2 GPU 파이프라인 설계·구현, ECS Fargate 배포, Terraform IaC |
-| **팀 규모** | 4인 (인프라 1, AI 2, 프론트엔드 1) |
+| **역할** | S3 / SQS / EC2 GPU 파이프라인 설계·구현 |
+| **팀 규모** | 3인 (AI Cloud Native, Infra — S3+SQS+EC2 GPU, Infra — Fullstack) |
+| **내 파트** | 영상 업로드(S3 Pre-signed URL) → 메시지 큐(SQS) → GPU 온디맨드 분석(Lambda·EC2) 전체 흐름 |
 
 ---
 
@@ -76,7 +76,7 @@ Client → Pre-signed URL → S3 Upload
 | 항목 | 내용 |
 |------|------|
 | **S** (Situation) | EC2 GPU 인스턴스가 항시 가동되어 유휴 시간에도 비용이 발생하고 있었음 |
-| **T** (Task) | Cloud Infra Lead로서 S3/SQS/EC2 영상 처리 파이프라인 설계·구현 |
+| **T** (Task) | S3/SQS/EC2 GPU 영상 처리 파이프라인 설계·구현 담당 |
 | **A** (Action) | ① SQS → Lambda → EC2 GPU 온디맨드 기동으로 비용 문제 해결 설계 ② 빌드 중 23GB 문제 발견 → ECR + EBS 캐시 분리로 재설계 |
 | **R** (Result) | 비용·빌드 문제를 연속으로 발견하고 2단계 아키텍처 재설계를 완성 |
 
@@ -109,27 +109,22 @@ Client → JWT 인증 → Pre-signed URL 발급 → S3 Direct Upload → Upload 
 - 3회 연속 연장 실패 시 자동 해제
 - **Error Handler** — 에러 타입(TEMPORARY/PERMANENT/SYSTEM) 분류 + 지수 백오프 재시도
 
-### 4. Terraform IaC (`terraform/`)
+### 4. Terraform — S3/SQS/Lambda 인프라 (`terraform/`)
 
 - **SQS**: DLQ 연동, Long Polling 20초, CloudWatch 알람
 - **Lambda**: SQS 트리거, IAM 최소 권한
-- **ECS Fargate**: Backend 컨테이너 오케스트레이션
 - **S3**: 이벤트 알림, 버킷 정책
-- **RDS**: PostgreSQL + pgvector
 
 ---
 
-## 🛠 기술 스택
+## 🛠 기술 스택 (내 담당 범위)
 
 | 구분 | 기술 |
 |------|------|
-| **Backend** | Django REST Framework, Python 3.10+ |
-| **Frontend** | Next.js 14, TypeScript, Tailwind CSS |
-| **Database** | PostgreSQL 15, pgvector |
-| **Cloud** | AWS (S3, SQS, Lambda, EC2 GPU, ECS Fargate, ECR, RDS, Route53) |
-| **IaC** | Terraform |
-| **CI/CD** | GitHub Actions → ECR → ECS Deploy |
-| **Container** | Docker, Docker Compose, Nginx |
+| **Cloud** | AWS S3, SQS, Lambda, EC2 GPU (g5.xlarge), ECR, EBS |
+| **Backend API** | Django REST Framework (S3 Pre-signed URL, SQS 메시지 발행) |
+| **GPU Worker** | Python, boto3, threading (Visibility Timeout Manager) |
+| **IaC** | Terraform (S3, SQS, Lambda 리소스) |
 
 ---
 
@@ -188,9 +183,7 @@ Client → JWT 인증 → Pre-signed URL 발급 → S3 Direct Upload → Upload 
 ├── terraform/               # Infrastructure as Code
 │   ├── sqs.tf               # SQS + DLQ + CloudWatch
 │   ├── lambda.tf            # Lambda + IAM
-│   ├── s3.tf                # S3 + 이벤트 알림
-│   ├── ecs-fargate.tf       # ECS Fargate Backend
-│   └── rds.tf               # PostgreSQL + pgvector
+│   └── s3.tf                # S3 + 이벤트 알림
 ├── front/                   # Next.js Frontend
 └── nginx/                   # Reverse Proxy
 ```
