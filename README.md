@@ -1,328 +1,249 @@
-# Unmanned Store Action Timeline Extraction Agent
+# Unmanned Store — Cloud-Native Video Analysis Pipeline
 
-## Project Overview
+> **EC2 GPU 항시 가동 비용 문제 발견 → SQS·Lambda 온디맨드 아키텍처 2단계 재설계 완성**
 
-This project is an anomaly detection agent for unmanned convenience stores that extracts action timelines from vision-based surveillance data. The system records all pre-anomalous behaviors of users in a database, allowing system administrators to query and retrieve timelines of incidents through natural language prompts. Administrators can easily discover what events occurred at specific times, providing comprehensive monitoring and security capabilities.
+무인매장 CCTV 영상에서 행동 타임라인을 추출하는 클라우드 네이티브 파이프라인입니다.  
+영상 업로드부터 GPU 기반 분석까지의 전체 흐름을 **S3 → SQS → Lambda → EC2 GPU 온디맨드** 아키텍처로 설계·구현했습니다.
 
-## Repository Status
+---
 
-🔒 **Private Repository**: This project is currently in development and not yet publicly available. If you need access, please contact the project maintainers.
+## 📌 담당 역할
 
-## Architecture
+| 항목 | 내용 |
+|------|------|
+| **역할** | Cloud Infra Lead |
+| **담당** | S3/SQS/EC2 GPU 파이프라인 설계·구현, ECS Fargate 배포, Terraform IaC |
+| **팀 규모** | 4인 (인프라 1, AI 2, 프론트엔드 1) |
 
-- **Frontend**: Next.js with TypeScript
-- **Backend**: Django REST Framework
-- **Database**: PostgreSQL
-- **AI Models**: Custom vision models running in separate Docker containers
-- **Deployment**: Docker Compose with Nginx reverse proxy
+---
 
-## Deployment Options
+## 🏗 아키텍처 진화 — 3단계
 
-### Production Deployment (Docker Compose) - Recommended
+### AS-IS: GPU 상시 가동
 
-For production deployment with existing infrastructure:
-
-```bash
-# Clone the repository (requires access)
-git clone [private-repo-url]
-cd capstone
-
-# Build and start all services
-docker-compose up -d
-
-# Check service status
-docker-compose ps
+```
+Client → S3 Upload → SQS → EC2 GPU (Always ON)
+                                 ↓
+                           Video Analysis
 ```
 
-**Service Ports:**
+**문제**: GPU EC2 인스턴스(g5.xlarge)가 유휴 시간에도 계속 가동 → 비용 낭비 심각
 
-- Frontend (Next.js): `http://your-server:3000`
-- Backend API (Django): `http://your-server:8001`
-- Database (PostgreSQL): `localhost:5433`
-- Nginx (Load Balancer): `http://your-server:80`
+---
 
-### Development Environment Setup
+### TO-BE ①: Lambda + EC2 온디맨드 기동
 
-### Development Environment Setup
-
-For local development and testing:
-
-#### Prerequisites
-
-- Python 3.10+
-- Node.js 18+
-- PostgreSQL 15+
-- Docker (optional, for AI models)
-
-#### Step 1: Clone Repository
-
-```bash
-# Clone the repository (requires access)
-git clone [private-repo-url]
-cd capstone
+```
+Client → Pre-signed URL → S3 Upload
+                              ↓
+                     S3 Event Notification
+                              ↓
+                           SQS Queue ←→ DLQ (Dead Letter Queue)
+                              ↓
+                     Lambda (Trigger)
+                              ↓
+                     EC2 GPU On-Demand 기동
+                              ↓
+                        Video Analysis
+                              ↓
+                     PostgreSQL + pgvector
 ```
 
-#### Step 2: Backend Setup
+**해결**: 영상 업로드 시에만 Lambda가 EC2 GPU를 기동 → 유휴 비용 제거
 
-#### Step 2: Backend Setup
+---
+
+### TO-BE ②: ECR + EBS 캐시 분리
+
+```
+                     EC2 GPU On-Demand 기동
+                              ↓
+                 ┌─────────────────────────┐
+                 │   ECR (Docker Image)    │ ← 사전 빌드된 이미지
+                 │   EBS (Model Cache)     │ ← 23GB 모델 캐시
+                 └─────────────────────────┘
+                              ↓
+                     즉시 분석 시작 (빌드 없음)
+```
+
+**문제 발견**: EC2 기동 시 23GB AI 모델을 매번 다운로드 → 기동 시간 과다  
+**해결**: ECR에 Docker 이미지 사전 빌드 + EBS 볼륨에 모델 캐시 → 빌드 없이 즉시 기동
+
+---
+
+## ⭐ STAR
+
+| 항목 | 내용 |
+|------|------|
+| **S** (Situation) | EC2 GPU 인스턴스가 항시 가동되어 유휴 시간에도 비용이 발생하고 있었음 |
+| **T** (Task) | Cloud Infra Lead로서 S3/SQS/EC2 영상 처리 파이프라인 설계·구현 |
+| **A** (Action) | ① SQS → Lambda → EC2 GPU 온디맨드 기동으로 비용 문제 해결 설계 ② 빌드 중 23GB 문제 발견 → ECR + EBS 캐시 분리로 재설계 |
+| **R** (Result) | 비용·빌드 문제를 연속으로 발견하고 2단계 아키텍처 재설계를 완성 |
+
+---
+
+## 🔧 핵심 기술 구현
+
+### 1. S3 Pre-signed URL 기반 업로드 (`back/apps/api/`)
+
+```
+Client → JWT 인증 → Pre-signed URL 발급 → S3 Direct Upload → Upload 확인 → SQS 메시지 발행
+```
+
+- JWT 토큰 기반 사용자 인증
+- S3 Pre-signed URL로 클라이언트 직접 업로드 (서버 부하 제거)
+- 업로드 확인 시 SQS 메시지 자동 발행
+
+### 2. SQS + Lambda 이벤트 파이프라인 (`lambda/sqs_to_batch.py`)
+
+- S3 이벤트 → SQS 큐 → Lambda 자동 트리거
+- **Partial Batch Response** — 실패 메시지만 재시도 (정상 메시지는 삭제)
+- **에러 분류** — transient(네트워크) vs permanent(데이터) 구분하여 DLQ 정책 최적화
+- video_id 추출 검증 + 구조화된 로깅
+
+### 3. GPU Worker 가시성 타임아웃 관리 (`gpu_worker/`)
+
+- **Visibility Timeout Manager** — 백그라운드 스레드에서 SQS 메시지 가시성 타임아웃 자동 연장
+- `threading.Lock` 기반 스레드 안전한 메시지 관리
+- 동적 모니터링 간격 (extension_interval의 50%)
+- 3회 연속 연장 실패 시 자동 해제
+- **Error Handler** — 에러 타입(TEMPORARY/PERMANENT/SYSTEM) 분류 + 지수 백오프 재시도
+
+### 4. Terraform IaC (`terraform/`)
+
+- **SQS**: DLQ 연동, Long Polling 20초, CloudWatch 알람
+- **Lambda**: SQS 트리거, IAM 최소 권한
+- **ECS Fargate**: Backend 컨테이너 오케스트레이션
+- **S3**: 이벤트 알림, 버킷 정책
+- **RDS**: PostgreSQL + pgvector
+
+---
+
+## 🛠 기술 스택
+
+| 구분 | 기술 |
+|------|------|
+| **Backend** | Django REST Framework, Python 3.10+ |
+| **Frontend** | Next.js 14, TypeScript, Tailwind CSS |
+| **Database** | PostgreSQL 15, pgvector |
+| **Cloud** | AWS (S3, SQS, Lambda, EC2 GPU, ECS Fargate, ECR, RDS, Route53) |
+| **IaC** | Terraform |
+| **CI/CD** | GitHub Actions → ECR → ECS Deploy |
+| **Container** | Docker, Docker Compose, Nginx |
+
+---
+
+## 🐛 트러블슈팅
+
+### 1. EC2 GPU 유휴 비용 문제
+
+| 항목 | 내용 |
+|------|------|
+| **현상** | GPU EC2(g5.xlarge) 인스턴스가 영상 처리 요청이 없는 시간에도 계속 가동 |
+| **원인** | SQS Long Polling 방식으로 항시 인스턴스를 유지하는 아키텍처 |
+| **해결** | SQS → Lambda → EC2 온디맨드 기동으로 전환. 요청이 있을 때만 인스턴스 기동 |
+
+### 2. 23GB AI 모델 빌드 시간 문제
+
+| 항목 | 내용 |
+|------|------|
+| **현상** | EC2 온디맨드 기동 시 Docker 빌드 과정에서 23GB 모델 다운로드 필요 |
+| **원인** | Docker 이미지에 모델 파일이 포함되어 있어 매 기동마다 전체 빌드 발생 |
+| **해결** | ECR에 사전 빌드된 Docker 이미지 + EBS 볼륨에 모델 캐시 분리로 즉시 기동 |
+
+### 3. SQS 메시지 중복 처리
+
+| 항목 | 내용 |
+|------|------|
+| **현상** | 동일 영상에 대해 GPU 분석이 여러 번 실행됨 |
+| **원인** | S3 이벤트 알림이 동일 객체에 대해 중복 발생 |
+| **해결** | MessageDeduplicationId 지원 추가 + S3 이벤트 필터 규칙 강화 |
+
+### 4. Visibility Timeout 초과로 메시지 재처리
+
+| 항목 | 내용 |
+|------|------|
+| **현상** | 대용량 영상 처리 중 SQS 메시지가 다시 큐에 나타나 중복 처리 |
+| **원인** | 고정 visibility timeout(5분)이 실제 처리 시간(10분+)보다 짧음 |
+| **해결** | 백그라운드 스레드에서 가시성 타임아웃 동적 연장 + 스레드 안전 관리 |
+
+---
+
+## 📁 프로젝트 구조
+
+```
+├── back/                    # Django Backend
+│   ├── apps/api/            # REST API (S3 업로드, SQS 메시지 발행)
+│   │   ├── services/        # S3Service, SQSService
+│   │   └── views_s3.py      # Pre-signed URL, Upload 확인
+│   └── core/                # Django 설정
+├── gpu_worker/              # EC2 GPU Worker
+│   ├── video_processor.py   # SQS 메시지 수신 → 영상 분석
+│   ├── visibility_manager.py # 가시성 타임아웃 자동 연장
+│   └── error_handler.py     # 에러 분류 + 재시도
+├── lambda/                  # AWS Lambda
+│   └── sqs_to_batch.py      # SQS → EC2 기동 트리거
+├── batch/                   # Batch 프로세서
+│   └── process_video.py     # FastAPI 분석 서비스 호출
+├── terraform/               # Infrastructure as Code
+│   ├── sqs.tf               # SQS + DLQ + CloudWatch
+│   ├── lambda.tf            # Lambda + IAM
+│   ├── s3.tf                # S3 + 이벤트 알림
+│   ├── ecs-fargate.tf       # ECS Fargate Backend
+│   └── rds.tf               # PostgreSQL + pgvector
+├── front/                   # Next.js Frontend
+└── nginx/                   # Reverse Proxy
+```
+
+---
+
+## 🚀 로컬 개발 환경
+
+### Prerequisites
+
+- Python 3.10+, Node.js 18+, PostgreSQL 15+, Docker
+
+### Quick Start
 
 ```bash
-cd back
-python3 -m venv env
-source ./env/bin/activate
+# 1. Clone
+git clone https://github.com/protove/Unmanned-Store-Cloud-Native.git
+cd Unmanned-Store-Cloud-Native
 
-# Install dependencies
+# 2. Backend
+cd back && python3 -m venv env && source env/bin/activate
 pip install -r requirements.txt
+cp .env.example .env  # 환경변수 설정
 
-# Or for development
-pip install -e .
+# 3. Frontend
+cd ../front && yarn install
+
+# 4. Docker Compose (전체 서비스)
+docker-compose up -d
 ```
 
-#### Step 3: Frontend Setup
-
-```bash
-cd front
-yarn install
-```
-
-#### Step 4: Environment Configuration
-
-#### Step 4: Environment Configuration
-
-Create environment configuration:
-
-```bash
-cd back
-touch .env
-```
-
-**Development Configuration** (`.env`):
+### Environment Variables
 
 ```env
-SECRET_KEY=your-secret-key-here
+# Django
+SECRET_KEY=your-secret-key
 DEBUG=True
-ALLOWED_HOSTS=127.0.0.1,localhost
 
-# Database configuration
-DB_ENGINE=django.db.backends.postgresql
-DB_NAME=your_db_name
-DB_USER=your_db_user
-DB_PASSWORD=your_db_password
+# Database
 DB_HOST=localhost
 DB_PORT=5432
+DB_NAME=capstone
+DB_USER=postgres
+DB_PASSWORD=your-password
+
+# AWS
+AWS_REGION=ap-northeast-2
+S3_BUCKET_NAME=your-bucket
+SQS_QUEUE_URL=your-queue-url
 ```
 
-**Production Configuration** (automatically handled by Docker):
+---
 
-```env
-SECRET_KEY=auto-generated-secure-key
-DEBUG=False
-ALLOWED_HOSTS=your-domain.com,your-server-ip
+## 📄 License
 
-# Database (Docker internal networking)
-DB_HOST=db
-DB_PORT=5432
-```
-
-Generate Django secret key:
-
-```bash
-python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
-```
-
-#### Step 5: Database Setup
-
-#### Step 5: Database Setup
-
-```bash
-cd back
-source ./env/bin/activate
-
-# Run migrations
-python manage.py makemigrations
-python manage.py migrate
-
-# Create superuser (optional)
-python manage.py createsuperuser
-```
-
-#### Step 6: Start Development Servers
-
-```bash
-# Terminal 1: Backend
-cd back
-source ./env/bin/activate
-python manage.py runserver
-
-# Terminal 2: Frontend
-cd front
-yarn dev
-```
-
-## Infrastructure & Dependencies
-
-### Current Server Setup
-
-This application runs alongside other services on the same server with the following port allocation:
-
-**AI Model Containers:**
-
-- **Port 7000**: Video Analysis Pipeline (YOLOv8x + MiVOLO + MeBOW + LLaVA)
-- **Port 7500**: LangGraph API (Korean NLP + Text2SQL + Translation)
-- **Port 8087**: Video Summary Service (LLaMA-based summarization)
-
-**Application Services:**
-
-- **Port 8000**: Django Backend (Development)
-- **Port 3000**: Next.js Frontend (Development)
-
-### AI Model Containers
-
-The application integrates with three specialized Docker containers that provide AI-powered analysis capabilities:
-
-#### 1. Video Analysis Pipeline Container (Port 7000)
-
-📹 **Purpose**: Comprehensive video analysis for person detection, age/gender estimation, and behavior analysis.
-
-**Key Features:**
-
-- **Person & Face Detection**: YOLOv8x model for real-time object detection
-- **Age & Gender Estimation**: MiVOLO (Multi-input Transformer) with 99.46% gender accuracy and 4.22 years age MAE
-- **Behavior Analysis**: MeBOW (Motion-Enhanced Body Object Weight) for action pattern recognition
-- **Visual Language Model**: LLaVA-FastViT-HD 0.5B for scene understanding
-
-**Processing Pipeline:**
-
-```bash
-# FPS optimization for memory efficiency
-convert_video_to_10fps() → MiVOLO analysis → Data processing → Database storage
-```
-
-**API Endpoint:**
-
-```bash
-POST /analyze
-Content-Type: application/json
-{
-    "video_id": 123,
-    "video_path": "/path/to/video.mp4"
-}
-```
-
-#### 2. LangGraph API Container (Port 7500)
-
-🤖 **Purpose**: Korean natural language processing and SQL query generation for timeline data retrieval.
-
-**Key Features:**
-
-- Korean text processing and question classification
-- Korean-to-English translation using Helsinki-NLP/opus-mt-ko-en
-- Text-to-SQL generation with finetuned T5-LM-Large model
-- General question answering with Bllossom/llama-3.2-Korean-Bllossom-AICA-5B
-
-**Processing Flow:**
-
-```
-Korean Query → Question Type Classification →
-├── Timeline/SQL Question → Translation → SQL Generation
-└── General Question → LLM Response
-```
-
-**API Endpoint:**
-
-```bash
-POST /api/process
-Content-Type: application/json
-{
-    "prompt": "10시에서 13시 사이 사건 데이터를 알려줘"
-}
-```
-
-#### 3. Video Summary Container (Port 8087)
-
-📋 **Purpose**: AI-powered video content summarization using finetuned LLaMA models.
-
-**Key Features:**
-
-- Video content analysis and summarization
-- User-triggered summary generation
-- Optimized LLaMA-based model for video understanding
-- RESTful API for external integration
-
-**Usage:**
-
-- Users upload videos through the frontend
-- Summary generation triggered by user interaction
-- AI provides comprehensive video content summary
-
-**Container Management:**
-
-```bash
-# Check all AI containers status
-docker ps | grep nvidia/cuda
-
-# Monitor container logs
-docker logs api      # Video Analysis
-docker logs apps     # LangGraph API
-docker logs vlm      # Video Summary
-```
-
-### Production Port Allocation
-
-When deployed via Docker Compose:
-
-- **Port 80/443**: Nginx Load Balancer
-- **Port 8001**: Django Backend (Production)
-- **Port 3000**: Next.js Frontend (Production)
-- **Port 5433**: PostgreSQL Database (Production)
-
-## Troubleshooting
-
-### Port Conflicts
-
-If you encounter port conflicts during deployment:
-
-```bash
-# Check current port usage
-netstat -tlnp | grep LISTEN
-
-# Modify docker-compose.yml port mappings if needed
-# Example: Change 8001:8000 to 8002:8000
-```
-
-### Database Connection Issues
-
-```bash
-# Check PostgreSQL status
-docker-compose logs db
-
-# Reset database (caution: data loss)
-docker-compose down -v
-docker-compose up -d
-```
-
-### AI Container Management
-
-```bash
-# Verify all AI containers are running
-docker ps | grep cuda
-
-# Check individual container status and logs
-docker logs api      # Video Analysis Pipeline
-docker logs apps     # LangGraph API Service
-docker logs vlm      # Video Summary Service
-
-# Monitor container resource usage
-docker stats api apps vlm
-
-# Restart specific container if needed
-docker restart api   # or apps, vlm
-```
-
-## Contributing
-
-This is a private repository. For contribution guidelines and access requests, please contact the project maintainers.
-
-## License
-
-Private - All rights reserved.
+MIT License
