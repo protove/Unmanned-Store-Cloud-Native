@@ -1,12 +1,12 @@
-﻿{
+{
     "family": "capstone-backend",
-    "executionRoleArn": "arn:aws:iam::287709190208:role/capstone-ecs-task-execution-role",
-    "taskRoleArn": "arn:aws:iam::287709190208:role/capstone-ecs-task-role",
+    "executionRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/capstone-ecs-task-execution-role",
+    "taskRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/capstone-ecs-task-role",
     "networkMode": "awsvpc",
     "containerDefinitions": [
         {
             "name": "backend",
-            "image": "287709190208.dkr.ecr.ap-northeast-2.amazonaws.com/capstone-backend:vlm-fix",
+            "image": "<AWS_ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/capstone-backend:vlm-fix",
             "cpu": 0,
             "portMappings": [
                 {
@@ -43,7 +43,7 @@
                 },
                 {
                     "name": "DB_HOST",
-                    "value": "capstone-postgres.cf6eecwwyypm.ap-northeast-2.rds.amazonaws.com"
+                    "value": "<RDS_ENDPOINT>"
                 },
                 {
                     "name": "AWS_BEDROCK_REGION",
@@ -51,7 +51,7 @@
                 },
                 {
                     "name": "AWS_SQS_QUEUE_URL",
-                    "value": "https://sqs.ap-northeast-2.amazonaws.com/287709190208/capstone-dev-video-processing"
+                    "value": "https://sqs.ap-northeast-2.amazonaws.com/<AWS_ACCOUNT_ID>/capstone-dev-video-processing"
                 },
                 {
                     "name": "USE_BEDROCK",
@@ -83,11 +83,11 @@
             "secrets": [
                 {
                     "name": "DB_PASSWORD",
-                    "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:287709190208:secret:capstone/db-password-bnNBe2"
+                    "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:<AWS_ACCOUNT_ID>:secret:capstone/db-password"
                 },
                 {
                     "name": "SECRET_KEY",
-                    "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:287709190208:secret:capstone/django-secret-key-hy2NI8"
+                    "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:<AWS_ACCOUNT_ID>:secret:capstone/django-secret-key"
                 }
             ],
             "logConfiguration": {

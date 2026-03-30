@@ -3,7 +3,7 @@
   "type": "container",
   "platformCapabilities": ["FARGATE"],
   "containerProperties": {
-    "image": "287709190208.dkr.ecr.ap-northeast-2.amazonaws.com/capstone-dev-batch-processor:latest",
+    "image": "<AWS_ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/capstone-dev-batch-processor:latest",
     "fargatePlatformConfiguration": {
       "platformVersion": "LATEST"
     },
@@ -17,8 +17,8 @@
         "value": "4096"
       }
     ],
-    "executionRoleArn": "arn:aws:iam::287709190208:role/capstone-dev-batch-execution-role",
-    "jobRoleArn": "arn:aws:iam::287709190208:role/capstone-dev-batch-task-role",
+    "executionRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/capstone-dev-batch-execution-role",
+    "jobRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/capstone-dev-batch-task-role",
     "logConfiguration": {
       "logDriver": "awslogs",
       "options": {
@@ -34,7 +34,7 @@
       },
       {
         "name": "SQS_QUEUE_URL",
-        "value": "https://sqs.ap-northeast-2.amazonaws.com/287709190208/capstone-dev-video-processing"
+        "value": "https://sqs.ap-northeast-2.amazonaws.com/<AWS_ACCOUNT_ID>/capstone-dev-video-processing"
       },
       {
         "name": "S3_BUCKET_RAW",
@@ -56,7 +56,7 @@
     "secrets": [
       {
         "name": "POSTGRES_PASSWORD",
-        "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:287709190208:secret:capstone/db-password-bnNBe2"
+        "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:<AWS_ACCOUNT_ID>:secret:capstone/db-password"
       }
     ]
   },

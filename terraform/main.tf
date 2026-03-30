@@ -18,7 +18,7 @@ provider "aws" {
 variable "account_id" {
   description = "AWS Account ID"
   type        = string
-  default     = "287709190208"
+  default     = ""
 }
 
 variable "region" {

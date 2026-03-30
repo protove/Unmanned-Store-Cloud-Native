@@ -217,8 +217,8 @@ aws sts get-caller-identity
 # 출력 예시:
 # {
 #     "UserId": "AIDAXXXXXXXXX",
-#     "Account": "287709190208",
-#     "Arn": "arn:aws:iam::287709190208:user/seungbeom-dev"
+#     "Account": "<AWS_ACCOUNT_ID>",
+#     "Arn": "arn:aws:iam::<AWS_ACCOUNT_ID>:user/seungbeom-dev"
 # }
 ```
 
