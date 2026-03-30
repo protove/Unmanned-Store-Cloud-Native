@@ -16,8 +16,11 @@ import uuid
 
 from datetime import datetime
 from .services.s3_service import s3_service
-# from .services.auth_service import jwt_required  # TODO: 임시 비활성화 (개발용)
 from .services.sqs_service import sqs_service
+
+# TODO: PRODUCTION - JWT 인증 반드시 활성화 필요
+# from .services.auth_service import jwt_required
+# 모든 업로드/다운로드/삭제 엔드포인트에 @jwt_required 데코레이터 적용할 것
 from apps.db.models import Video
 from apps.db.serializers import VideoSerializer
 
@@ -25,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 @api_view(['POST'])
-# @jwt_required  # TODO: 임시 비활성화 (개발용)
+# @jwt_required  # TODO: PRODUCTION - 반드시 활성화
 def request_upload_url(request):
     """
     Step 1: 업로드 토큰 및 Pre-signed URL 요청
@@ -115,7 +118,7 @@ def request_upload_url(request):
 
 
 @api_view(['POST'])
-# @jwt_required  # TODO: 임시 비활성화 (개발용)
+# @jwt_required  # TODO: PRODUCTION - 반드시 활성화
 def confirm_upload(request):
     """
     Step 2: 업로드 완료 확인 및 비디오 메타데이터 저장
@@ -227,7 +230,13 @@ def confirm_upload(request):
             logger.info(f"SQS 메시지 발송 성공: video_id={video.video_id}, message_id={sqs_result['message_id']}")
         else:
             logger.error(f"SQS 메시지 발송 실패: video_id={video.video_id}, error={sqs_result['error']}")
-            # SQS 실패해도 업로드는 성공으로 처리 (비동기 처리이므로)
+            return Response({
+                'success': False,
+                'video_id': video.video_id,
+                'error': '비디오는 업로드되었으나 처리 큐 등록에 실패했습니다. 관리자에게 문의하세요.',
+                'video': serializer.data,
+                'processing_queued': False
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         logger.info(f"비디오 업로드 완료: video_id={video.video_id}, s3_key={s3_key}")
         
@@ -236,7 +245,7 @@ def confirm_upload(request):
             'video_id': video.video_id,
             'message': '업로드가 완료되었습니다.',
             'video': serializer.data,
-            'processing_queued': sqs_result['success']
+            'processing_queued': True
         }, status=status.HTTP_201_CREATED)
         
     except ValueError as e:
@@ -248,17 +257,17 @@ def confirm_upload(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     except Exception as e:
-        logger.error(f"❌ [Exception] 서버 오류: {type(e).__name__}: {str(e)}")
         import traceback
+        logger.error(f"❌ [Exception] 서버 오류: {type(e).__name__}: {str(e)}")
         logger.error(f"📚 Traceback: {traceback.format_exc()}")
         return Response(
-            {'error': f'서버 내부 오류: {type(e).__name__}: {str(e)}'}, 
+            {'error': '서버 내부 오류가 발생했습니다.'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 
 @api_view(['GET'])
-# @jwt_required  # TODO: 임시 비활성화 (개발용)
+# @jwt_required  # TODO: PRODUCTION - 반드시 활성화
 def get_video_download_url(request, video_id):
     """
     비디오 다운로드/스트리밍 URL 생성
@@ -273,7 +282,7 @@ def get_video_download_url(request, video_id):
         video = Video.objects.get(video_id=video_id)
         
         # S3 키에서 다운로드 URL 생성
-        download_url = s3_service.generate_download_url(video.video_file)
+        download_url = s3_service.generate_download_url(video.s3_key)
         
         logger.info(f"📥 다운로드 URL 생성: video_id={video_id}")
         
@@ -296,14 +305,14 @@ def get_video_download_url(request, video_id):
 
 
 @api_view(['DELETE'])
-# @jwt_required  # TODO: 임시 비활성화 (개발용)
+# @jwt_required  # TODO: PRODUCTION - 반드시 활성화
 def delete_video(request, video_id):
     """
     비디오 삭제 (DB + S3)
     """
     try:
         video = Video.objects.get(video_id=video_id)
-        s3_key = video.video_file
+        s3_key = video.s3_key
         
         # S3에서 파일 삭제
         s3_deleted = s3_service.delete_video(s3_key)
