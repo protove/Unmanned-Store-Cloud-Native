@@ -25,6 +25,7 @@ class VisibilityTimeoutManager:
         """
         self.sqs_service = sqs_service
         self.active_messages: Dict[str, Dict] = {}  # receipt_handle -> message_info
+        self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._monitor_thread: Optional[threading.Thread] = None
         
@@ -79,7 +80,8 @@ class VisibilityTimeoutManager:
             'status': 'processing'
         }
         
-        self.active_messages[receipt_handle] = message_info
+        with self._lock:
+            self.active_messages[receipt_handle] = message_info
         
         # 초기 가시성 타임아웃 설정
         success = self.sqs_service.change_message_visibility(
@@ -100,11 +102,11 @@ class VisibilityTimeoutManager:
             receipt_handle: SQS 메시지 수신 핸들
             additional_time: 추가 연장 시간 (초)
         """
-        if receipt_handle not in self.active_messages:
-            logger.warning(f"등록되지 않은 메시지: {receipt_handle[:20]}...")
-            return False
-        
-        message_info = self.active_messages[receipt_handle]
+        with self._lock:
+            if receipt_handle not in self.active_messages:
+                logger.warning(f"등록되지 않은 메시지: {receipt_handle[:20]}...")
+                return False
+            message_info = self.active_messages[receipt_handle]
         
         # 가시성 타임아웃 연장
         success = self.sqs_service.change_message_visibility(receipt_handle, additional_time)
@@ -113,12 +115,15 @@ class VisibilityTimeoutManager:
             message_info['last_extended'] = datetime.now(timezone.utc)
             message_info['extension_count'] += 1
             message_info['visibility_timeout'] = additional_time
+            message_info['consecutive_extend_failures'] = 0
             
             logger.info(f"가시성 타임아웃 연장: video_id={message_info['video_id']}, "
                        f"추가시간={additional_time}초, 연장횟수={message_info['extension_count']}")
             return True
         else:
-            logger.error(f"가시성 타임아웃 연장 실패: video_id={message_info['video_id']}")
+            message_info['consecutive_extend_failures'] = message_info.get('consecutive_extend_failures', 0) + 1
+            logger.error(f"가시성 타임아웃 연장 실패: video_id={message_info['video_id']}, "
+                        f"연속실패={message_info['consecutive_extend_failures']}")
             return False
     
     def unregister_message(self, receipt_handle: str, status: str = 'completed'):
@@ -129,18 +134,18 @@ class VisibilityTimeoutManager:
             receipt_handle: SQS 메시지 수신 핸들  
             status: 완료 상태 ('completed', 'failed', 'timeout')
         """
-        if receipt_handle not in self.active_messages:
+        with self._lock:
+            message_info = self.active_messages.pop(receipt_handle, None)
+        
+        if message_info is None:
             logger.warning(f"등록되지 않은 메시지 해제 시도: {receipt_handle[:20]}...")
             return
         
-        message_info = self.active_messages[receipt_handle]
         processing_time = (datetime.now(timezone.utc) - message_info['start_time']).total_seconds()
         
         logger.info(f"메시지 처리 완료: video_id={message_info['video_id']}, "
                    f"상태={status}, 처리시간={processing_time:.1f}초, "
                    f"연장횟수={message_info['extension_count']}")
-        
-        del self.active_messages[receipt_handle]
     
     def get_active_message_count(self) -> int:
         """현재 처리 중인 메시지 수 반환"""
@@ -160,8 +165,11 @@ class VisibilityTimeoutManager:
                 messages_to_extend = []
                 messages_to_timeout = []
                 
-                # 활성 메시지들 체크
-                for receipt_handle, message_info in self.active_messages.items():
+                # 활성 메시지들 체크 (스냅샷으로 안전하게 순회)
+                with self._lock:
+                    active_snapshot = dict(self.active_messages)
+                
+                for receipt_handle, message_info in active_snapshot.items():
                     elapsed_since_extension = (current_time - message_info['last_extended']).total_seconds()
                     total_elapsed = (current_time - message_info['start_time']).total_seconds()
                     
@@ -178,9 +186,23 @@ class VisibilityTimeoutManager:
                 for receipt_handle in messages_to_extend:
                     self.extend_visibility(receipt_handle, self.default_timeout)
                 
+                # 연장 연속 실패 3회 이상인 메시지 정리
+                with self._lock:
+                    messages_to_remove = [
+                        (rh, info.get('video_id'))
+                        for rh, info in self.active_messages.items()
+                        if info.get('consecutive_extend_failures', 0) >= 3
+                    ]
+                for rh, vid in messages_to_remove:
+                    logger.error(f"가시성 연장 연속 실패로 메시지 해제: video_id={vid}")
+                    self.unregister_message(rh, 'extend_failed')
+                
                 # 타임아웃된 메시지들 정리
                 for receipt_handle in messages_to_timeout:
-                    message_info = self.active_messages[receipt_handle]
+                    with self._lock:
+                        message_info = self.active_messages.get(receipt_handle)
+                    if message_info is None:
+                        continue
                     logger.error(f"메시지 처리 타임아웃: video_id={message_info['video_id']}")
                     self.unregister_message(receipt_handle, 'timeout')
                 
@@ -191,7 +213,7 @@ class VisibilityTimeoutManager:
             except Exception as e:
                 logger.error(f"가시성 타임아웃 모니터링 오류: {e}")
             
-            # 60초마다 체크
-            self._stop_event.wait(60)
+            # extension_interval의 50%마다 체크
+            self._stop_event.wait(self.extension_interval // 2)
         
         logger.info("가시성 타임아웃 모니터링 스레드 종료")

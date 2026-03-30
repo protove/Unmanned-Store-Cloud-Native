@@ -29,7 +29,8 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
 
 try:
     import django
-    django.setup()
+    if not django.apps.registry.apps.ready:
+        django.setup()
     
     from apps.api.services.sqs_service import sqs_service
     from apps.api.services.s3_service import s3_service
@@ -187,8 +188,7 @@ class GPUVideoWorker:
             
             if not success:
                 logger.error(f"메시지 파싱 실패: {payload}")
-                # 파싱 실패 시 메시지 삭제 (잘못된 형식)
-                sqs_service.delete_message(receipt_handle)
+                # 파싱 실패 시 큐로 복귀 (가시성 타임아웃 만료 후 재처리)
                 self.error_count += 1
                 return
             
@@ -273,9 +273,13 @@ class GPUVideoWorker:
             # 가시성 복구
             try:
                 sqs_service.change_message_visibility(receipt_handle, 0)
+            except Exception:
+                pass
+            # unregister는 항상 시도하여 메모리 누수 방지
+            try:
                 self.visibility_manager.unregister_message(receipt_handle, 'error')
-            except:
-                pass  # 복구 시도도 실패하면 그냥 넘어감
+            except Exception:
+                pass
                 
             self.error_count += 1
     
@@ -299,9 +303,9 @@ class GPUVideoWorker:
             
             if success and file_info:
                 file_size = file_info.get('ContentLength', 0)
-                # 파일 크기 기반 예상 시간 (MB당 1초 + 기본 120초)
+                # 파일 크기 기반 예상 시간 (GPU 처리: MB당 3초 + 기본 300초)
                 size_mb = file_size / (1024 * 1024)
-                estimated_time = max(120, int(size_mb * 1.0 + 120))
+                estimated_time = max(300, int(size_mb * 3.0 + 300))
                 logger.debug(f"파일 크기 기반 예상 시간: {size_mb:.1f}MB → {estimated_time}초")
                 return estimated_time
         except Exception as e:
@@ -606,35 +610,8 @@ class GPUVideoWorker:
             logger.error(f" {context} 실패: {type(e).__name__}: {str(e)}")
             raise
     
-    def _download_video_from_s3(self, s3_bucket: str, s3_key: str) -> str:
-        """S3에서 비디오 다운로드"""
-        # 임시 디렉토리 생성
-        temp_dir = SCRIPT_DIR / 'temp'
-        temp_dir.mkdir(exist_ok=True)
-        
-        # 로컬 파일 경로
-        file_name = Path(s3_key).name
-        local_path = temp_dir / f"{int(time.time())}_{file_name}"
-        
-        # S3에서 다운로드 (s3_service 사용)
-        try:
-            # Pre-signed URL 생성 후 다운로드 방식 사용
-            download_url = s3_service.generate_download_url(s3_key)
-            
-            import requests
-            response = requests.get(download_url, stream=True)
-            response.raise_for_status()
-            
-            with open(local_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            logger.info(f"비디오 다운로드 완료: {local_path}")
-            return str(local_path)
-            
-        except Exception as e:
-            logger.error(f"S3 다운로드 실패: {e}")
-            raise
+    # NOTE: _download_video_from_s3 is defined above (line ~363) with @retry_on_error decorator.
+    # The duplicate definition that was here has been removed to prevent overwriting.
     
     def _run_gpu_inference(self, video_path: str) -> Dict[str, Any]:
         """
@@ -694,11 +671,11 @@ class GPUVideoWorker:
             video = Video.objects.get(video_id=video_id)
             
             # 비디오 상태 업데이트 (status 필드가 있다고 가정)
-            if hasattr(video, 'processing_status'):
-                video.processing_status = status
+            if hasattr(video, 'analysis_status'):
+                video.analysis_status = status
             
-            # major_event 필드에 처리 결과 저장
-            video.major_event = json.dumps(result) if result else None
+            # summary 필드에 처리 결과 저장
+            video.summary = json.dumps(result) if result else None
             video.save()
             
             logger.info(f"DB 업데이트 완료: video_id={video_id}, status={status}")

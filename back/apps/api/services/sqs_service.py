@@ -49,12 +49,60 @@ class SQSVideoProcessingService:
             raise ImproperlyConfigured(f"환경변수 {var_name}가 설정되지 않았습니다.")
         return value
     
+    def send_message(
+        self,
+        message_body: Dict[str, Any],
+        message_attributes: Optional[Dict] = None,
+        deduplication_id: Optional[str] = None,
+        visibility_timeout: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        SQS 메시지 발송 (범용)
+
+        Args:
+            message_body: 메시지 본문 (dict)
+            message_attributes: SQS 메시지 속성
+            deduplication_id: FIFO 큐용 중복 제거 ID
+            visibility_timeout: 개별 메시지 가시성 타임아웃 (초)
+
+        Returns:
+            SQS 응답 정보
+        """
+        try:
+            params = {
+                'QueueUrl': self.queue_url,
+                'MessageBody': json.dumps(message_body),
+            }
+            if message_attributes:
+                params['MessageAttributes'] = message_attributes
+            if deduplication_id:
+                params['MessageDeduplicationId'] = deduplication_id
+            if visibility_timeout is not None:
+                params['DelaySeconds'] = 0  # ensure immediate delivery
+
+            response = self.sqs_client.send_message(**params)
+
+            logger.info(f"SQS 메시지 발송 성공: MessageId={response['MessageId']}")
+            return {
+                'success': True,
+                'message_id': response['MessageId'],
+                'md5_of_body': response.get('MD5OfBody', 'N/A')
+            }
+        except Exception as e:
+            logger.error(f"SQS 메시지 발송 실패: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
     def send_video_processing_message(
         self, 
         s3_bucket: str, 
         s3_key: str, 
         video_id: str,
-        additional_data: Optional[Dict[str, Any]] = None
+        additional_data: Optional[Dict[str, Any]] = None,
+        deduplication_id: Optional[str] = None,
+        visibility_timeout: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         비디오 처리 메시지를 SQS로 발송
@@ -91,11 +139,10 @@ class SQSVideoProcessingService:
             if additional_data:
                 message_body.update(additional_data)
             
-            # SQS 메시지 발송
-            response = self.sqs_client.send_message(
-                QueueUrl=self.queue_url,
-                MessageBody=json.dumps(message_body),
-                MessageAttributes={
+            # SQS 메시지 발송 (send_message 범용 메서드 활용)
+            return self.send_message(
+                message_body=message_body,
+                message_attributes={
                     'video_id': {
                         'StringValue': str(video_id),
                         'DataType': 'String'
@@ -108,16 +155,10 @@ class SQSVideoProcessingService:
                         'StringValue': s3_bucket,
                         'DataType': 'String'
                     }
-                }
+                },
+                deduplication_id=deduplication_id,
+                visibility_timeout=visibility_timeout
             )
-            
-            logger.info(f"SQS 메시지 발송 성공: MessageId={response['MessageId']}, video_id={video_id}")
-            
-            return {
-                'success': True,
-                'message_id': response['MessageId'],
-                'md5_of_body': response.get('MD5OfBody', 'N/A')
-            }
             
         except Exception as e:
             logger.error(f"SQS 메시지 발송 실패: {e}")
