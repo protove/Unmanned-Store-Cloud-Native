@@ -216,6 +216,62 @@ class S3VideoUploadService:
         except:
             return False
 
+    def get_file_info(self, s3_key: str) -> Dict:
+        """
+        S3 파일 메타데이터 조회 (head_object)
+        
+        Args:
+            s3_key: S3 객체 키
+            
+        Returns:
+            파일 메타데이터 딕셔너리 (ContentLength, ContentType, LastModified 등)
+        """
+        try:
+            response = self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_key)
+            logger.info(f"📄 S3 파일 정보 조회: key={s3_key}, size={response.get('ContentLength')}")
+            return response
+        except Exception as e:
+            logger.error(f"❌ S3 파일 정보 조회 실패: key={s3_key} - {e}")
+            raise
+
+    def upload_string_as_file(self, content: str, bucket: str, key: str, content_type: str = 'text/plain') -> None:
+        """
+        문자열 콘텐츠를 S3에 파일로 업로드
+        
+        Args:
+            content: 업로드할 문자열 콘텐츠
+            bucket: S3 버킷명
+            key: S3 객체 키
+            content_type: MIME 타입 (기본: text/plain)
+        """
+        try:
+            self.s3_client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=content.encode('utf-8'),
+                ContentType=content_type
+            )
+            logger.info(f"📤 S3 문자열 업로드 완료: s3://{bucket}/{key}")
+        except Exception as e:
+            logger.error(f"❌ S3 문자열 업로드 실패: s3://{bucket}/{key} - {e}")
+            raise
+
+    def download_file(self, bucket: str, s3_key: str, local_path: str) -> None:
+        """
+        S3에서 파일을 로컬 경로로 다운로드
+        
+        Args:
+            bucket: S3 버킷명
+            s3_key: S3 객체 키
+            local_path: 로컬 저장 경로
+        """
+        try:
+            self.s3_client.download_file(bucket, s3_key, local_path)
+            logger.info(f"📥 S3 파일 다운로드 완료: s3://{bucket}/{s3_key} → {local_path}")
+        except Exception as e:
+            logger.error(f"❌ S3 파일 다운로드 실패: s3://{bucket}/{s3_key} - {e}")
+            raise
+
 
 # 싱글톤 인스턴스
 s3_service = S3VideoUploadService()

@@ -81,12 +81,15 @@ class RetryManager:
             return ErrorType.SYSTEM
         
         # S3 ClientError 세부 분류
-        if hasattr(exception, 'response') and 'Error' in exception.response:
-            error_code = exception.response['Error']['Code']
-            if error_code in ['NoSuchBucket', 'NoSuchKey', 'AccessDenied']:
-                return ErrorType.PERMANENT
-            elif error_code in ['ServiceUnavailable', 'SlowDown', 'RequestTimeout']:
-                return ErrorType.TEMPORARY
+        try:
+            if hasattr(exception, 'response'):
+                error_code = exception.response['Error']['Code']
+                if error_code in ['NoSuchBucket', 'NoSuchKey', 'AccessDenied']:
+                    return ErrorType.PERMANENT
+                elif error_code in ['ServiceUnavailable', 'SlowDown', 'RequestTimeout']:
+                    return ErrorType.TEMPORARY
+        except (KeyError, TypeError, AttributeError):
+            pass
         
         # 기본값: 일시적 오류로 분류
         return ErrorType.TEMPORARY
@@ -258,24 +261,34 @@ def retry_on_error(max_retries: int = 3, context: str = ""):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             function_context = context or func.__name__
+            last_exception = None
             
-            # 임시로 재시도 횟수 변경
-            original_max_retries = retry_manager.max_retries
-            retry_manager.max_retries = max_retries
+            for attempt in range(1, max_retries + 1):
+                try:
+                    result = func(*args, **kwargs)
+                    if attempt > 1:
+                        logger.info(f"{function_context} 재시도 성공 ({attempt}번째 시도)")
+                    return result
+                except Exception as e:
+                    last_exception = e
+                    error_type = retry_manager.classify_error(e)
+                    
+                    logger.warning(f"{function_context} 실패 (시도 {attempt}/{max_retries}): "
+                                 f"{type(e).__name__}: {str(e)[:100]}")
+                    
+                    if error_type in [ErrorType.PERMANENT, ErrorType.SYSTEM]:
+                        error_tracker.record_error(e, function_context, func.__name__)
+                        raise
+                    
+                    if attempt >= max_retries:
+                        break
+                    
+                    delay = retry_manager.calculate_delay(attempt)
+                    logger.info(f"{delay:.1f}초 후 재시도...")
+                    time.sleep(delay)
             
-            try:
-                return retry_manager.retry_with_backoff(
-                    func, 
-                    *args, 
-                    context=function_context, 
-                    **kwargs
-                )
-            except Exception as e:
-                error_tracker.record_error(e, function_context, func.__name__)
-                raise
-            finally:
-                # 원래 설정 복구
-                retry_manager.max_retries = original_max_retries
+            error_tracker.record_error(last_exception, function_context, func.__name__)
+            raise last_exception
         
         return wrapper
     return decorator

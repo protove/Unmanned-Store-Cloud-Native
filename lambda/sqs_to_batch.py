@@ -23,6 +23,38 @@ batch_client = boto3.client('batch')
 JOB_QUEUE = os.environ.get('BATCH_JOB_QUEUE')
 JOB_DEFINITION = os.environ.get('BATCH_JOB_DEFINITION')
 
+# 재시도 가능한 일시적 에러 코드
+TRANSIENT_ERROR_CODES = {
+    'ThrottlingException', 'ServiceUnavailable',
+    'TooManyRequestsException', 'InternalError',
+}
+
+
+def _is_transient_error(error: Exception) -> bool:
+    """일시적 에러 여부 판별 (재시도 가능)"""
+    if isinstance(error, ClientError):
+        return error.response['Error']['Code'] in TRANSIENT_ERROR_CODES
+    if isinstance(error, (ConnectionError, TimeoutError)):
+        return True
+    return False
+
+
+def _extract_video_id(body: dict, s3_key: str) -> str | None:
+    """메시지 body 또는 S3 key에서 video_id 추출"""
+    # 1) body에서 직접 추출
+    try:
+        if 'video' in body and 'id' in body['video']:
+            return str(body['video']['id'])
+    except (TypeError, KeyError):
+        pass
+    # 2) S3 key 패턴에서 추출 (예: uploads/36/video.mp4 → 36)
+    parts = s3_key.split('/')
+    if len(parts) >= 2:
+        candidate = parts[-2]
+        if candidate.isdigit():
+            return candidate
+    return None
+
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
@@ -36,7 +68,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         처리 결과
     """
     
-    logger.info(f"Received event: {json.dumps(event)}")
+    record_count = len(event.get('Records', []))
+    logger.info(f"Received SQS event: record_count={record_count}")
     
     # 환경 변수 검증
     if not JOB_QUEUE or not JOB_DEFINITION:
@@ -60,51 +93,43 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             # S3 이벤트 정보 추출
             s3_records = body.get('Records', [])
             if not s3_records:
-                logger.warning(f"No S3 records in message: {message_id}")
+                logger.error(f"No S3 records in message: message_id={message_id}")
+                failed_jobs.append({
+                    'message_id': message_id,
+                    'error': 'No S3 records in message body',
+                    'transient': False,
+                })
                 continue
             
             s3_record = s3_records[0]
             bucket = s3_record['s3']['bucket']['name']
             key = s3_record['s3']['object']['key']
             
+            # video_id 추출 (필수)
+            video_id = _extract_video_id(body, key)
+            if not video_id:
+                logger.error(f"video_id 추출 실패: message_id={message_id}, s3_key={key}")
+                failed_jobs.append({
+                    'message_id': message_id,
+                    'error': f'video_id extraction failed for key={key}',
+                    'transient': False,
+                })
+                continue
+            
             # Batch Job 제출
             job_name = f"video-process-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}-{message_id[:8]}"
             
-            logger.info(f"Submitting Batch job: {job_name}")
-            logger.info(f"S3 Object: s3://{bucket}/{key}")
-            
-            # S3 키에서 video_id 추출 시도 (예: uploads/36/video.mp4 → video_id=36)
-            # 또는 메시지에 video_id가 포함되어 있을 수 있음
-            video_id = None
-            try:
-                # body에서 video_id 추출 시도
-                if 'video' in body and 'id' in body['video']:
-                    video_id = str(body['video']['id'])
-                    logger.info(f"Extracted video_id from message: {video_id}")
-            except Exception as e:
-                logger.warning(f"Failed to extract video_id: {e}")
+            logger.info(
+                f"Submitting Batch job: job_name={job_name}, "
+                f"video_id={video_id}, s3=s3://{bucket}/{key}"
+            )
             
             container_env = [
-                {
-                    'name': 'S3_BUCKET',
-                    'value': bucket
-                },
-                {
-                    'name': 'S3_KEY',
-                    'value': key
-                },
-                {
-                    'name': 'MESSAGE_ID',
-                    'value': message_id
-                }
+                {'name': 'S3_BUCKET', 'value': bucket},
+                {'name': 'S3_KEY', 'value': key},
+                {'name': 'MESSAGE_ID', 'value': message_id},
+                {'name': 'VIDEO_ID', 'value': video_id},
             ]
-            
-            # video_id가 있으면 환경 변수에 추가
-            if video_id:
-                container_env.append({
-                    'name': 'VIDEO_ID',
-                    'value': video_id
-                })
             
             response = batch_client.submit_job(
                 jobName=job_name,
@@ -122,30 +147,44 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             
             job_id = response['jobId']
             
-            logger.info(f"✅ Batch job submitted: {job_id}")
+            logger.info(
+                f"Batch job submitted: job_id={job_id}, "
+                f"video_id={video_id}, message_id={message_id}"
+            )
             
             successful_jobs.append({
                 'message_id': message_id,
                 'job_id': job_id,
                 'job_name': job_name,
+                'video_id': video_id,
                 's3_bucket': bucket,
-                's3_key': key
+                's3_key': key,
             })
             
         except ClientError as e:
-            logger.error(f"❌ AWS error processing message {record.get('messageId')}: {e}")
+            transient = _is_transient_error(e)
+            error_code = e.response['Error']['Code']
+            logger.error(
+                f"AWS error: message_id={record.get('messageId')}, "
+                f"error_code={error_code}, transient={transient}"
+            )
             failed_jobs.append({
                 'message_id': record.get('messageId'),
-                'error': str(e)
+                'error': str(e),
+                'transient': transient,
             })
-            # 실패한 메시지는 SQS에 남겨서 재시도
-            
+
         except Exception as e:
-            logger.error(f"❌ Unexpected error processing message {record.get('messageId')}: {e}")
-            logger.exception("Full traceback:")
+            transient = _is_transient_error(e)
+            logger.error(
+                f"Unexpected error: message_id={record.get('messageId')}, "
+                f"error_type={type(e).__name__}, transient={transient}",
+                exc_info=True,
+            )
             failed_jobs.append({
                 'message_id': record.get('messageId'),
-                'error': str(e)
+                'error': str(e),
+                'transient': transient,
             })
     
     # 결과 요약
@@ -157,16 +196,22 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         'failures': failed_jobs
     }
     
-    logger.info(f"Processing complete: {json.dumps(result)}")
+    logger.info(
+        f"Processing complete: total={result['total_messages']}, "
+        f"success={result['successful_jobs']}, failed={result['failed_jobs']}"
+    )
     
-    # Lambda와 SQS 통합에서는 예외를 발생시키지 않으면 자동으로 메시지 삭제됨
-    # 실패한 메시지만 재시도하려면 batchItemFailures 반환
-    if failed_jobs:
+    # 실패한 메시지만 SQS에 남겨서 재시도 (batchItemFailures)
+    failed_message_ids = {f['message_id'] for f in failed_jobs}
+    if failed_message_ids:
+        logger.warning(
+            f"Returning batchItemFailures: count={len(failed_message_ids)}, "
+            f"message_ids={failed_message_ids}"
+        )
         return {
             'batchItemFailures': [
-                {'itemIdentifier': record['receiptHandle']}
-                for record in event['Records']
-                if record['messageId'] in [f['message_id'] for f in failed_jobs]
+                {'itemIdentifier': msg_id}
+                for msg_id in failed_message_ids
             ]
         }
     

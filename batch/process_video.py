@@ -104,10 +104,12 @@ class VideoProcessor:
             body = json.loads(message['Body'])
             
             # S3 이벤트 레코드 추출
-            if 'Records' not in body:
-                raise VideoProcessorError("Invalid S3 event format: no Records found")
+            records = body.get('Records')
+            if not records or not isinstance(records, list) or len(records) == 0:
+                logger.error(f"Invalid S3 event: 'Records' missing or empty. Body: {json.dumps(body)[:500]}")
+                raise VideoProcessorError("Invalid S3 event format: 'Records' missing or empty")
             
-            record = body['Records'][0]
+            record = records[0]
             s3_info = record['s3']
             
             bucket = s3_info['bucket']['name']
@@ -136,8 +138,14 @@ class VideoProcessor:
             # VIDEO_ID 가져오기
             video_id = os.environ.get('VIDEO_ID')
             if not video_id:
-                logger.warning("VIDEO_ID not found in environment variables, using default: 1")
-                video_id = 1
+                # S3 key에서 의미 있는 식별자 추출 시도
+                s3_key = s3_event.get('key', '')
+                derived_id = os.path.splitext(os.path.basename(s3_key))[0] if s3_key else ''
+                if not derived_id:
+                    logger.error("VIDEO_ID not set and cannot derive from S3 key. Aborting.")
+                    raise VideoProcessorError("VIDEO_ID is required but not set")
+                logger.warning(f"VIDEO_ID not set, derived from S3 key: '{derived_id}'")
+                video_id = derived_id
             
             # FastAPI 엔드포인트 구성
             analysis_url = f"{self.fastapi_endpoint.rstrip('/')}/analyze"
@@ -157,32 +165,52 @@ class VideoProcessor:
             logger.info(f"Calling FastAPI: {analysis_url}")
             logger.info(f"Payload: {json.dumps(payload, indent=2)}")
             
-            # FastAPI 호출 (타임아웃 25분)
+            # FastAPI 호출 (타임아웃 25분, 최대 2회 시도)
             # FastAPI는 S3에서 다운로드 → 분석 → PostgreSQL + pgvector에 저장
-            response = requests.post(
-                analysis_url,
-                json=payload,
-                timeout=1500,  # 25분
-                headers={'Content-Type': 'application/json'}
-            )
+            max_attempts = 2
+            last_error = None
             
-            response.raise_for_status()
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    if attempt > 1:
+                        logger.info(f"Retry attempt {attempt}/{max_attempts} after transient error")
+                        time.sleep(5)  # 재시도 전 5초 대기
+                    
+                    response = requests.post(
+                        analysis_url,
+                        json=payload,
+                        timeout=1500,  # 25분
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    
+                    response.raise_for_status()
+                    
+                    result = response.json()
+                    logger.info(f"✅ FastAPI response: {json.dumps(result, indent=2)}")
+                    logger.info("📊 Analysis started. Check job status via FastAPI.")
+                    
+                    return result
+                    
+                except requests.exceptions.Timeout:
+                    logger.error("FastAPI request timed out")
+                    raise VideoProcessorError("FastAPI timeout")
+                
+                except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+                    last_error = e
+                    logger.warning(f"Transient network error (attempt {attempt}/{max_attempts}): {e}")
+                    if attempt == max_attempts:
+                        break
+                    continue
+                
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"FastAPI request failed: {e}")
+                    if hasattr(e, 'response') and e.response is not None:
+                        logger.error(f"Response body: {e.response.text}")
+                    raise VideoProcessorError(f"FastAPI request error: {e}")
             
-            result = response.json()
-            logger.info(f"✅ FastAPI response: {json.dumps(result, indent=2)}")
-            logger.info("📊 Analysis started. Check job status via FastAPI.")
-            
-            return result
-            
-        except requests.exceptions.Timeout:
-            logger.error("FastAPI request timed out")
-            raise VideoProcessorError("FastAPI timeout")
-        
-        except requests.exceptions.RequestException as e:
-            logger.error(f"FastAPI request failed: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response body: {e.response.text}")
-            raise VideoProcessorError(f"FastAPI request error: {e}")
+            # 모든 재시도 실패
+            logger.error(f"FastAPI call failed after {max_attempts} attempts")
+            raise VideoProcessorError(f"FastAPI request error after retries: {last_error}")
     
     # S3 저장 로직 제거
     # FastAPI가 분석 결과를 PostgreSQL + pgvector에 직접 저장하므로

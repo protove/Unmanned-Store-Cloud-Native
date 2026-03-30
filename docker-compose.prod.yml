@@ -38,7 +38,7 @@ services:
       - VECTOR_DB_PORT=5432
       - VECTOR_DB_NAME=${VECTOR_DB_NAME:-vector_db}
       - VECTOR_DB_USER=${VECTOR_DB_USER:-vector_user}
-      - VECTOR_DB_PASSWORD=${VECTOR_DB_PASSWORD:-vector_password}
+      - VECTOR_DB_PASSWORD=${VECTOR_DB_PASSWORD:?VECTOR_DB_PASSWORD required}
       # AWS 자격 증명
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
@@ -69,13 +69,13 @@ services:
       - DB_PORT=5432
       - DB_NAME=${POSTGRES_DB:-capstone_db}
       - DB_USER=${POSTGRES_USER:-capstone_user}
-      - DB_PASSWORD=${POSTGRES_PASSWORD:-capstone_password}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD required}
       # Vector DB 연결 정보 (분석 결과 저장용)
       - VECTOR_DB_HOST=postgres-vector
       - VECTOR_DB_PORT=5432
       - VECTOR_DB_NAME=${VECTOR_DB_NAME:-vector_db}
       - VECTOR_DB_USER=${VECTOR_DB_USER:-vector_user}
-      - VECTOR_DB_PASSWORD=${VECTOR_DB_PASSWORD:-vector_password}
+      - VECTOR_DB_PASSWORD=${VECTOR_DB_PASSWORD:?VECTOR_DB_PASSWORD required}
       # AWS S3 설정 (영상 다운로드용)
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
@@ -105,7 +105,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-capstone_db}
       POSTGRES_USER: ${POSTGRES_USER:-capstone_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-capstone_password}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
     volumes:
       - postgres_main_data:/var/lib/postgresql/data
     networks:
@@ -120,7 +120,7 @@ services:
     environment:
       POSTGRES_DB: ${VECTOR_DB_NAME:-vector_db}
       POSTGRES_USER: ${VECTOR_DB_USER:-vector_user}
-      POSTGRES_PASSWORD: ${VECTOR_DB_PASSWORD:-vector_password}
+      POSTGRES_PASSWORD: ${VECTOR_DB_PASSWORD:?VECTOR_DB_PASSWORD required}
       POSTGRES_INITDB_ARGS: '--encoding=UTF-8'
     volumes:
       - postgres_vector_data:/var/lib/postgresql/data

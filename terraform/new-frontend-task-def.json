@@ -2,7 +2,7 @@
     "containerDefinitions":  [
                                  {
                                      "name":  "frontend",
-                                     "image":  "287709190208.dkr.ecr.ap-northeast-2.amazonaws.com/capstone-frontend:vlm-latest",
+                                     "image":  "<AWS_ACCOUNT_ID>.dkr.ecr.ap-northeast-2.amazonaws.com/capstone-frontend:vlm-latest",
                                      "cpu":  0,
                                      "portMappings":  [
                                                           {
@@ -58,8 +58,8 @@
                                  }
                              ],
     "family":  "capstone-frontend",
-    "taskRoleArn":  "arn:aws:iam::287709190208:role/capstone-ecs-task-role",
-    "executionRoleArn":  "arn:aws:iam::287709190208:role/capstone-ecs-task-execution-role",
+    "taskRoleArn":  "arn:aws:iam::<AWS_ACCOUNT_ID>:role/capstone-ecs-task-role",
+    "executionRoleArn":  "arn:aws:iam::<AWS_ACCOUNT_ID>:role/capstone-ecs-task-execution-role",
     "networkMode":  "awsvpc",
     "volumes":  [
 
